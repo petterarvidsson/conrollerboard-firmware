@@ -39,7 +39,7 @@ const int CONNECTED_BIT = BIT0;
 
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
-static const char *TAG = "example";
+static const char *TAG = "controllerboard";
 
 static const char *REQUEST = "GET " WEB_URL " HTTP/1.0\r\n"
     "Host: "WEB_SERVER"\r\n"
@@ -48,9 +48,9 @@ static const char *REQUEST = "GET " WEB_URL " HTTP/1.0\r\n"
 
 static void enter_deep_sleep(uint32_t minutes) {
     const uint64_t wakeup_time_sec = minutes*60;
-    printf("Enabling timer wakeup, %ds\n", (int)wakeup_time_sec);
+    ESP_LOGI(TAG, "Enabling timer wakeup, %ds\n", (int)wakeup_time_sec);
     esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000L);
-    printf("Entering deep sleep\n");
+    ESP_LOGI(TAG, "Entering deep sleep\n");
     gettimeofday(&sleep_enter_time, NULL);
     esp_deep_sleep_start();
 }
@@ -171,11 +171,11 @@ static void http_get_task(void *pvParameters)
 
     recv_buf[t] = '\0';
 
-    printf("%s\n", recv_buf);
+    ESP_LOGI(TAG, "%s\n", recv_buf);
 
     char * csv = strstr(recv_buf, "\r\n\r\n") + 4;
     if(csv != NULL) {
-        printf("%s", csv);
+        ESP_LOGI(TAG, "%s", csv);
 
         char * line = csv;
 
@@ -183,20 +183,20 @@ static void http_get_task(void *pvParameters)
 
         while(line != (NULL + 1) && sscanf(line, "%d,%d", &port, &minutes) == 2) {
             if(port == 0) {
-                printf("Received sleep command. Will sleep for %d minutes\n", minutes);
+                ESP_LOGI(TAG, "Received sleep command. Will sleep for %d minutes\n", minutes);
                 enter_deep_sleep(minutes);
             } else {
                 gpio_set_level(ports[port - 1], 1);
-                printf("Open port %d (GPIO %d) for %d minutes\n", port, ports[port - 1], minutes);
+                ESP_LOGI(TAG, "Open port %d (GPIO %d) for %d minutes\n", port, ports[port - 1], minutes);
                 vTaskDelay((minutes*60*1000) / portTICK_PERIOD_MS);
                 gpio_set_level(ports[port - 1], 0);
-                printf("Close port %d (GPIO %d)\n", port, ports[port - 1]);
+                ESP_LOGI(TAG, "Close port %d (GPIO %d)\n", port, ports[port - 1]);
             }
             line = strstr(line, "\n") + 1;
         }
     }
 
-    printf("Invalid response or no sleep command. Will sleep for %d minutes\n", DEFAULT_SLEEP);
+    ESP_LOGI(TAG, "Invalid response or no sleep command. Will sleep for %d minutes\n", DEFAULT_SLEEP);
     enter_deep_sleep(DEFAULT_SLEEP);
 }
 
@@ -212,17 +212,17 @@ void app_main() {
         gpio_pad_select_gpio(ports[i]);
         gpio_set_direction(ports[i], GPIO_MODE_OUTPUT);
         gpio_set_level(ports[i], level);
-        printf("Port %d ready for output %d\n", ports[i], level);
+        ESP_LOGI(TAG, "Port %d ready for output %d\n", ports[i], level);
     }
 
     switch (esp_sleep_get_wakeup_cause()) {
         case ESP_SLEEP_WAKEUP_TIMER: {
-            printf("Wake up from timer. Time spent in deep sleep: %dms\n", sleep_time_ms);
+            ESP_LOGI(TAG, "Wake up from timer. Time spent in deep sleep: %dms\n", sleep_time_ms);
             break;
         }
         case ESP_SLEEP_WAKEUP_UNDEFINED:
         default:
-            printf("Power on\n");
+            ESP_LOGI(TAG, "Power on\n");
             break;
     }
 
