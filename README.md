@@ -1,2 +1,3 @@
-# conrollerboard-firmware
-ESP32 firmware for controller board with 8 ports
+# Controller board firmware
+
+Simple firmware for 8 port ESP32 based controller board
