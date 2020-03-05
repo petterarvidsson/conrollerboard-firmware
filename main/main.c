@@ -108,12 +108,19 @@ static void http_get_task(void *pvParameters)
     struct addrinfo *res;
     struct in_addr *addr;
     int s, r, t = 0;
-
+    EventBits_t connected;
     /* Wait for the callback to set the CONNECTED_BIT in the
        event group.
     */
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-                        false, true, portMAX_DELAY);
+    connected = xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
+                                    false, true, (1*60*1000) / portTICK_PERIOD_MS);
+
+    if((connected & CONNECTED_BIT) == 0) {
+        ESP_LOGI(TAG, "Failed to Connect to AP");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        enter_deep_sleep(DEFAULT_SLEEP);
+    }
+
     ESP_LOGI(TAG, "Connected to AP");
 
     int err = getaddrinfo(WEB_SERVER, "80", &hints, &res);
