@@ -16,6 +16,7 @@
 #include "esp_event_loop.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_task_wdt.h"
 
 #include "lwip/err.h"
 #include "lwip/sockets.h"
@@ -32,11 +33,11 @@ static EventGroupHandle_t wifi_event_group;
 const int CONNECTED_BIT = BIT0;
 
 /* Constants that aren't configurable in menuconfig */
-#define WEB_SERVER "wasser.borgsdorf.krasch.io"
+#define WEB_SERVER "wasser.app.petterarvidsson.se"
 #define WEB_PORT 80
-#define WEB_URL "http://wasser.borgsdorf.krasch.io/actions/eightport/"
+#define WEB_URL "http://wasser.app.petterarvidsson.se/actions/eightport/"
 #define DEFAULT_SLEEP 1
-
+#define WATCHDOG_TIMEOUT 75
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
 static const char *TAG = "controllerboard";
@@ -48,9 +49,9 @@ static const char *REQUEST = "GET " WEB_URL " HTTP/1.0\r\n"
 
 static void enter_deep_sleep(uint32_t minutes) {
     const uint64_t wakeup_time_sec = minutes*60;
-    ESP_LOGI(TAG, "Enabling timer wakeup, %ds\n", (int)wakeup_time_sec);
+    ESP_LOGI(TAG, "Enabling timer wakeup, %ds", (int)wakeup_time_sec);
     esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000L);
-    ESP_LOGI(TAG, "Entering deep sleep\n");
+    ESP_LOGI(TAG, "Entering deep sleep");
     gettimeofday(&sleep_enter_time, NULL);
     esp_deep_sleep_start();
 }
@@ -78,6 +79,7 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 
 static void initialise_wifi(void)
 {
+    ESP_ERROR_CHECK( nvs_flash_init() );
     tcpip_adapter_init();
     wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
@@ -99,8 +101,10 @@ static void initialise_wifi(void)
 static char recv_buf[1024];
 #define NUM_PORTS 8
 static int ports[NUM_PORTS] = {22, 23, 19, 21, 5, 18, 16, 17};
-static void http_get_task(void *pvParameters)
-{
+static void http_get_task(void *pvParameters) {
+
+    initialise_wifi();
+
     const struct addrinfo hints = {
         .ai_family = AF_INET,
         .ai_socktype = SOCK_STREAM,
@@ -117,8 +121,7 @@ static void http_get_task(void *pvParameters)
 
     if((connected & CONNECTED_BIT) == 0) {
         ESP_LOGI(TAG, "Failed to Connect to AP");
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        enter_deep_sleep(DEFAULT_SLEEP);
+        return;
     }
 
     ESP_LOGI(TAG, "Connected to AP");
@@ -127,8 +130,7 @@ static void http_get_task(void *pvParameters)
 
     if(err != 0 || res == NULL) {
         ESP_LOGE(TAG, "DNS lookup failed err=%d res=%p", err, res);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        enter_deep_sleep(DEFAULT_SLEEP);
+        return;
     }
 
     /* Code to print the resolved IP.
@@ -141,17 +143,15 @@ static void http_get_task(void *pvParameters)
     if(s < 0) {
             ESP_LOGE(TAG, "... Failed to allocate socket.");
             freeaddrinfo(res);
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            enter_deep_sleep(DEFAULT_SLEEP);
+            return;
     }
-    ESP_LOGI(TAG, "... allocated socket\r\n");
+    ESP_LOGI(TAG, "... allocated socket");
 
     if(connect(s, res->ai_addr, res->ai_addrlen) != 0) {
         ESP_LOGE(TAG, "... socket connect failed errno=%d", errno);
         close(s);
         freeaddrinfo(res);
-        vTaskDelay(4000 / portTICK_PERIOD_MS);
-        enter_deep_sleep(DEFAULT_SLEEP);
+        return;
     }
 
     ESP_LOGI(TAG, "... connected");
@@ -160,8 +160,7 @@ static void http_get_task(void *pvParameters)
     if (write(s, REQUEST, strlen(REQUEST)) < 0) {
             ESP_LOGE(TAG, "... socket send failed");
             close(s);
-            vTaskDelay(4000 / portTICK_PERIOD_MS);
-            enter_deep_sleep(DEFAULT_SLEEP);
+            return;
     }
     ESP_LOGI(TAG, "... socket send success");
 
@@ -173,7 +172,7 @@ static void http_get_task(void *pvParameters)
         t+=r;
     } while(r > 0);
 
-    ESP_LOGI(TAG, "... done reading from socket. Last read return=%d errno=%d\r\n", r, errno);
+    ESP_LOGI(TAG, "... done reading from socket. Last read return=%d errno=%d", r, errno);
     close(s);
 
     recv_buf[t] = '\0';
@@ -190,21 +189,27 @@ static void http_get_task(void *pvParameters)
 
         while(line != (NULL + 1) && sscanf(line, "%d,%d", &port, &minutes) == 2) {
             if(port == 0) {
-                ESP_LOGI(TAG, "Received sleep command. Will sleep for %d minutes\n", minutes);
+                ESP_LOGI(TAG, "Received sleep command. Will enter deep sleep for %d minutes", minutes);
                 enter_deep_sleep(minutes);
             } else {
                 gpio_set_level(ports[port - 1], 1);
-                ESP_LOGI(TAG, "Open port %d (GPIO %d) for %d minutes\n", port, ports[port - 1], minutes);
-                vTaskDelay((minutes*60*1000) / portTICK_PERIOD_MS);
+                ESP_LOGI(TAG, "Open port %d (GPIO %d) for %d minutes", port, ports[port - 1], minutes);
+                uint32_t minutes_left = minutes;
+                while(minutes_left > 0) {
+                    vTaskDelay((60*1000) / portTICK_PERIOD_MS);
+                    minutes_left = minutes_left - 1;
+                    ESP_LOGI(TAG, "Reset watchdog %d minutes left", minutes_left);
+                    esp_task_wdt_reset();
+                }
                 gpio_set_level(ports[port - 1], 0);
-                ESP_LOGI(TAG, "Close port %d (GPIO %d)\n", port, ports[port - 1]);
+                ESP_LOGI(TAG, "Close port %d (GPIO %d)", port, ports[port - 1]);
             }
             line = strstr(line, "\n") + 1;
         }
     }
 
-    ESP_LOGI(TAG, "Invalid response or no sleep command. Will sleep for %d minutes\n", DEFAULT_SLEEP);
-    enter_deep_sleep(DEFAULT_SLEEP);
+    ESP_LOGI(TAG, "Invalid response or no sleep command.");
+    return;
 }
 
 void app_main() {
@@ -213,27 +218,29 @@ void app_main() {
     gettimeofday(&now, NULL);
     int sleep_time_ms = (now.tv_sec - sleep_enter_time.tv_sec) * 1000 + (now.tv_usec - sleep_enter_time.tv_usec) / 1000;
 
+    switch (esp_sleep_get_wakeup_cause()) {
+        case ESP_SLEEP_WAKEUP_TIMER: {
+            ESP_LOGI(TAG, "Wake up from timer. Time spent in deep sleep: %dms", sleep_time_ms);
+            break;
+        }
+        case ESP_SLEEP_WAKEUP_UNDEFINED:
+        default:
+            ESP_LOGI(TAG, "Power on or reset. Did not sleep, so must enter default sleep");
+            enter_deep_sleep(DEFAULT_SLEEP);
+            break;
+    }
+
     int level = 0;
 
     for(int i = 0; i < NUM_PORTS; i++) {
         gpio_pad_select_gpio(ports[i]);
         gpio_set_direction(ports[i], GPIO_MODE_OUTPUT);
         gpio_set_level(ports[i], level);
-        ESP_LOGI(TAG, "Port %d ready for output %d\n", ports[i], level);
+        ESP_LOGI(TAG, "Port %d ready for output %d", ports[i], level);
     }
 
-    switch (esp_sleep_get_wakeup_cause()) {
-        case ESP_SLEEP_WAKEUP_TIMER: {
-            ESP_LOGI(TAG, "Wake up from timer. Time spent in deep sleep: %dms\n", sleep_time_ms);
-            break;
-        }
-        case ESP_SLEEP_WAKEUP_UNDEFINED:
-        default:
-            ESP_LOGI(TAG, "Power on\n");
-            break;
-    }
-
-    ESP_ERROR_CHECK( nvs_flash_init() );
-    initialise_wifi();
-    xTaskCreate(&http_get_task, "http_get_task", 4096, NULL, 5, NULL);
+    esp_task_wdt_init(WATCHDOG_TIMEOUT, true);
+    TaskHandle_t xHandle = NULL;
+    xTaskCreate(&http_get_task, "http_get_task", 4096, NULL, 5, &xHandle);
+    esp_task_wdt_add(xHandle);
 }
